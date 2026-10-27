@@ -34,6 +34,9 @@ jobs:
   check:
     name: Is there a new miner build?
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     outputs:
       build: ${{steps.decide.outputs.build}}
       commit: ${{steps.release.outputs.commit}}
@@ -58,6 +61,13 @@ jobs:
           fi
           echo "commit=${commit}" >> "${GITHUB_OUTPUT}"
           echo "Miner commit: ${commit}"
+
+      - name: Log in to GHCR (so a private package still counts as published)
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{github.actor}}
+          password: ${{secrets.GITHUB_TOKEN}}
 
       - name: Compare with the published image
         id: decide
