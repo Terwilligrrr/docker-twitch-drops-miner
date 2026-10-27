@@ -2,27 +2,29 @@
 FROM alpine:latest AS downloader
 ARG TARGETARCH
 ARG TARGETVARIANT
+ARG MINER_RELEASE_URL=https://github.com/Terwilligrrr/TwitchDropsMiner/releases/download/allen-build
 RUN apk add --no-cache ca-certificates wget unzip && \
     case ${TARGETARCH} in \
       "amd64") ARCH_SUFFIX="x86_64" ;; \
       "arm64") ARCH_SUFFIX="aarch64" ;; \
       *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
     esac && \
-    wget -P /tmp/ https://github.com/fireph/TwitchDropsMiner/releases/download/dev-build/Twitch.Drops.Miner.Linux.musl.PyInstaller-nicegui-${ARCH_SUFFIX}.zip && \
+    wget -P /tmp/ ${MINER_RELEASE_URL}/Twitch.Drops.Miner.Linux.musl.PyInstaller-nicegui-${ARCH_SUFFIX}.zip && \
     unzip -p /tmp/Twitch.Drops.Miner.Linux.musl.PyInstaller-nicegui-${ARCH_SUFFIX}.zip "Twitch Drops Miner/Twitch Drops Miner (by DevilXD)" >/TwitchDropsMiner && \
     chmod +x /TwitchDropsMiner
 
 # Final image
 FROM alpine:latest
 
-LABEL org.opencontainers.image.authors="fireph" \
+LABEL org.opencontainers.image.authors="Terwilligrrr (based on fireph)" \
       org.opencontainers.image.title="Twitch Drops Miner (WebUI)" \
       org.opencontainers.image.description="A Dockerized miner for Twitch Drops featuring the NiceGUI web interface" \
-      org.opencontainers.image.source="https://github.com/fireph/docker-twitch-drops-miner" \
+      org.opencontainers.image.source="https://github.com/Terwilligrrr/docker-twitch-drops-miner" \
       autoheal=true
 
 # Environment
-ENV TDM_VERSION_TAG=16.dev.dd3659c
+ARG MINER_VERSION_TAG=16.dev.unknown
+ENV TDM_VERSION_TAG=${MINER_VERSION_TAG}
 ENV UI_BACKEND=nicegui
 ENV WEBUI_HOST=0.0.0.0
 ENV USER_ID=1000
