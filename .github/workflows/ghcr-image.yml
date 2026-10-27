@@ -3,6 +3,11 @@ name: Build GHCR image
 # Builds ghcr.io/terwilligrrr/twitch-drops-miner from the "allen-build" release of
 # Terwilligrrr/TwitchDropsMiner. A new miner build is picked up by the schedule
 # below (the release lives in another repo, so it cannot start this workflow itself).
+#
+# Stays alive on its own: GitHub turns scheduled workflows off after 60 days without
+# repository activity. So (1) every run re-enables this workflow through the API and
+# (2) every image push commits last-built.txt to main. Any failure turns the run red and
+# opens an issue in this repo (job "report-failure").
 
 on:
   schedule:
@@ -11,6 +16,10 @@ on:
     inputs:
       force:
         description: "Build even if the image is already up to date"
+        type: boolean
+        default: false
+      fail_test:
+        description: "Test the alarm: fail on purpose (should open an issue)"
         type: boolean
         default: false
   push:
@@ -37,10 +46,23 @@ jobs:
     permissions:
       contents: read
       packages: read
+      actions: write
     outputs:
       build: ${{steps.decide.outputs.build}}
       commit: ${{steps.release.outputs.commit}}
     steps:
+      # Keeps GitHub from switching the schedule off (see the note at the top).
+      - name: Keep this schedule alive
+        env:
+          GH_TOKEN: ${{github.token}}
+        run: gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/ghcr-image.yml/enable"
+
+      - name: Fail on purpose (alarm test)
+        if: inputs.fail_test
+        run: |
+          echo "::error::Alarm test: failing on purpose"
+          exit 1
+
       - name: Read the miner release
         id: release
         env:
@@ -97,7 +119,7 @@ jobs:
     if: needs.check.outputs.build == 'true'
     runs-on: ubuntu-24.04
     permissions:
-      contents: read
+      contents: write
       packages: write
     concurrency:
       group: ghcr-image-push
@@ -166,3 +188,69 @@ jobs:
           docker push "${IMAGE}:sha-${SHORT}"
           docker push "${IMAGE}:latest"
           echo "Pushed ${IMAGE}:latest and ${IMAGE}:sha-${SHORT}" | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      # A commit on main is repository activity, so the schedule never goes idle for 60 days.
+      - name: Record the build in last-built.txt
+        if: github.ref == 'refs/heads/main'
+        env:
+          SHORT: ${{steps.vars.outputs.short}}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          {
+            echo "miner_commit=${MINER_COMMIT}"
+            echo "image=${IMAGE}:sha-${SHORT}"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > last-built.txt
+          git add last-built.txt
+          git commit -m "Record image build of miner ${SHORT}"
+          git pull --rebase origin main
+          git push origin HEAD:main
+          echo "Recorded the build in last-built.txt" | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: Skip last-built.txt (not on main)
+        if: github.ref != 'refs/heads/main'
+        run: echo "::notice::Not on main, so last-built.txt was not updated (test run)."
+
+  report-failure:
+    name: Open an issue if something failed
+    needs:
+      - check
+      - build
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      actions: read
+    steps:
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{github.token}}
+          EVENT: ${{github.event_name}}
+        run: |
+          title="Docker image build failed"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            echo "The image build (\`ghcr.io/terwilligrrr/twitch-drops-miner\`) failed. The image on GHCR may be out of date."
+            echo
+            echo "Run: ${run_url}"
+            echo
+            echo "Failed:"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+              --jq '.jobs[] | select(.conclusion == "failure") | "- " + .name + ": " + ([.steps[] | select(.conclusion == "failure") | .name] | join(", "))'
+          } > body.md
+          cat body.md
+          existing=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "\"${title}\" in:title" --json number,updatedAt --jq '.[0] | select(. != null) | "\(.number) \(.updatedAt)"')
+          if [ -z "${existing}" ]; then
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body-file body.md
+            exit 0
+          fi
+          number=${existing%% *}
+          age=$(( $(date +%s) - $(date -d "${existing#* }" +%s) ))
+          # The schedule runs every 30 minutes; do not add a comment each time while it stays broken.
+          if [ "${EVENT}" = "schedule" ] && [ "${age}" -lt 82800 ]; then
+            echo "Issue #${number} is already open and was updated less than 23 hours ago."
+          else
+            gh issue comment "${number}" --repo "${GITHUB_REPOSITORY}" --body-file body.md
+          fi
