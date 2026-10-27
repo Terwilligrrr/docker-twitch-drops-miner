@@ -3,7 +3,6 @@ FROM alpine:latest AS downloader
 ARG TARGETARCH
 ARG TARGETVARIANT
 ARG MINER_RELEASE_URL=https://github.com/Terwilligrrr/TwitchDropsMiner/releases/download/allen-build
-ARG MINER_VERSION_TAG=16.dev.unknown
 RUN apk add --no-cache ca-certificates wget unzip && \
     case ${TARGETARCH} in \
       "amd64") ARCH_SUFFIX="x86_64" ;; \
