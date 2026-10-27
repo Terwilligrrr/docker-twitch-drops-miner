@@ -40,23 +40,29 @@ env:
   COMMIT_LABEL: io.github.terwilligrrr.miner-commit
 
 jobs:
+  # Keeps GitHub from switching the schedule off (see the note at the top). A separate job,
+  # so a failure here turns the run red without blocking an image build.
+  keepalive:
+    name: Keep this schedule alive
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Re-enable this workflow
+        env:
+          GH_TOKEN: ${{github.token}}
+        run: gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/ghcr-image.yml/enable"
+
   check:
     name: Is there a new miner build?
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
-      actions: write
     outputs:
       build: ${{steps.decide.outputs.build}}
       commit: ${{steps.release.outputs.commit}}
     steps:
-      # Keeps GitHub from switching the schedule off (see the note at the top).
-      - name: Keep this schedule alive
-        env:
-          GH_TOKEN: ${{github.token}}
-        run: gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/ghcr-image.yml/enable"
-
       - name: Fail on purpose (alarm test)
         if: inputs.fail_test
         run: |
@@ -216,6 +222,7 @@ jobs:
   report-failure:
     name: Open an issue if something failed
     needs:
+      - keepalive
       - check
       - build
     if: failure()
@@ -238,7 +245,8 @@ jobs:
             echo
             echo "Failed:"
             gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
-              --jq '.jobs[] | select(.conclusion == "failure") | "- " + .name + ": " + ([.steps[] | select(.conclusion == "failure") | .name] | join(", "))'
+              --jq '.jobs[] | select(.conclusion == "failure") | "- " + .name + ": " + ([.steps[] | select(.conclusion == "failure") | .name] | join(", "))' \
+              || echo "(could not list the failed jobs; see the run)"
           } > body.md
           cat body.md
           existing=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "\"${title}\" in:title" --json number,updatedAt --jq '.[0] | select(. != null) | "\(.number) \(.updatedAt)"')
