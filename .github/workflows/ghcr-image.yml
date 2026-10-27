@@ -1,0 +1,158 @@
+name: Build GHCR image
+
+# Builds ghcr.io/terwilligrrr/twitch-drops-miner from the "allen-build" release of
+# Terwilligrrr/TwitchDropsMiner. A new miner build is picked up by the schedule
+# below (the release lives in another repo, so it cannot start this workflow itself).
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build even if the image is already up to date"
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile.webui
+      - entrypoint-webui.sh
+      - .github/workflows/ghcr-image.yml
+
+permissions:
+  contents: read
+
+env:
+  MINER_REPO: Terwilligrrr/TwitchDropsMiner
+  MINER_TAG: allen-build
+  IMAGE: ghcr.io/terwilligrrr/twitch-drops-miner
+  COMMIT_LABEL: io.github.terwilligrrr.miner-commit
+
+jobs:
+  check:
+    name: Is there a new miner build?
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{steps.decide.outputs.build}}
+      commit: ${{steps.release.outputs.commit}}
+    steps:
+      - name: Read the miner release
+        id: release
+        env:
+          GH_TOKEN: ${{github.token}}
+        run: |
+          # The miner workflow replaces the release (delete + create), so retry a short while.
+          for attempt in 1 2 3 4 5 6; do
+            if body=$(gh api "repos/${MINER_REPO}/releases/tags/${MINER_TAG}" --jq .body 2>/dev/null); then
+              commit=$(printf '%s\n' "${body}" | sed -n 's/.*Reference commit: \([a-f0-9]\{40\}\).*/\1/p')
+              [ -n "${commit}" ] && break
+            fi
+            echo "No usable ${MINER_TAG} release yet (attempt ${attempt}), waiting..."
+            sleep 20
+          done
+          if [ -z "${commit:-}" ]; then
+            echo "::error::Could not read the ${MINER_TAG} release of ${MINER_REPO}"
+            exit 1
+          fi
+          echo "commit=${commit}" >> "${GITHUB_OUTPUT}"
+          echo "Miner commit: ${commit}"
+
+      - name: Compare with the published image
+        id: decide
+        env:
+          EVENT: ${{github.event_name}}
+          FORCE: ${{inputs.force}}
+          MINER_COMMIT: ${{steps.release.outputs.commit}}
+        run: |
+          build=true
+          if [ "${EVENT}" = "schedule" ] || { [ "${EVENT}" = "workflow_dispatch" ] && [ "${FORCE}" != "true" ]; }; then
+            if docker pull -q "${IMAGE}:latest" >/dev/null 2>&1; then
+              current=$(docker inspect --format "{{ index .Config.Labels \"${COMMIT_LABEL}\" }}" "${IMAGE}:latest")
+              echo "Published image is built from miner commit: ${current}"
+              if [ "${current}" = "${MINER_COMMIT}" ]; then
+                build=false
+              fi
+            else
+              echo "No published image yet."
+            fi
+          fi
+          echo "build=${build}" >> "${GITHUB_OUTPUT}"
+          echo "Build needed: ${build}" | tee -a "${GITHUB_STEP_SUMMARY}"
+
+  build:
+    name: Build, smoke test, push
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: ghcr-image-push
+      cancel-in-progress: false
+    env:
+      MINER_COMMIT: ${{needs.check.outputs.commit}}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up variables
+        id: vars
+        run: echo "short=${MINER_COMMIT:0:7}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image (amd64, not pushed yet)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.webui
+          platforms: linux/amd64
+          load: true
+          pull: true
+          no-cache: true
+          tags: ${{env.IMAGE}}:latest
+          build-args: |
+            MINER_RELEASE_URL=https://github.com/${{env.MINER_REPO}}/releases/download/${{env.MINER_TAG}}
+            MINER_VERSION_TAG=16.dev.${{steps.vars.outputs.short}}
+          labels: |
+            ${{env.COMMIT_LABEL}}=${{env.MINER_COMMIT}}
+            org.opencontainers.image.revision=${{github.sha}}
+
+      - name: Smoke test (/health must return 200)
+        run: |
+          docker run -d --name smoke -p 5800:5800 "${IMAGE}:latest"
+          ok=false
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:5800/health || true)
+            echo "attempt ${i}: HTTP ${code}"
+            if [ "${code}" = "200" ]; then ok=true; break; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' smoke)" != "true" ]; then break; fi
+            sleep 3
+          done
+          docker logs smoke 2>&1 | tail -n 60
+          docker rm -f smoke >/dev/null
+          if [ "${ok}" != "true" ]; then
+            echo "::error::Smoke test failed: /health never returned 200"
+            exit 1
+          fi
+          echo "Smoke test passed: /health returned 200" | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{github.actor}}
+          password: ${{secrets.GITHUB_TOKEN}}
+
+      - name: Push tags
+        env:
+          SHORT: ${{steps.vars.outputs.short}}
+        run: |
+          docker tag "${IMAGE}:latest" "${IMAGE}:sha-${SHORT}"
+          docker push "${IMAGE}:sha-${SHORT}"
+          docker push "${IMAGE}:latest"
+          echo "Pushed ${IMAGE}:latest and ${IMAGE}:sha-${SHORT}" | tee -a "${GITHUB_STEP_SUMMARY}"
