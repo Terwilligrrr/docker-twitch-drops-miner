@@ -132,6 +132,22 @@ test_unhealthy_restarts_and_files_card() {
   assert_contains "$(<"$logfile")" "Application Terminated" "saved log content"
 }
 
+test_state_files_are_never_run_as_code() {
+  mkdir -p "$S"
+  local f payload="x[\$(touch $T/pwned)]"
+  for f in suppressed-froze card-froze.ts suppressed-stopped card-stopped.ts; do
+    printf '%s\n' "$payload" >"$S/$f"
+  done
+  printf '%s\n' "$payload" >"$S/restarts.log"
+  set_inspect running unhealthy 0 "0001-01-01T00:00:00Z"
+  run_wd
+  set_inspect exited none 1 "2026-10-28T20:00:00Z"
+  run_wd
+  assert_no_file "$T/pwned"
+  assert_eq "$(alerts_count)" 2 "corrupt state reads as 0, so both cards go out"
+  assert_contains "$(<"$ERR")" "ignoring corrupt" "corrupt state is logged"
+}
+
 test_freeze_logs_keep_newest_10() {
   mkdir -p "$S"
   local i

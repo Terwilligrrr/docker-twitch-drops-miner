@@ -18,6 +18,7 @@
 
 set -uo pipefail
 shopt -s nullglob
+umask 077 # runs as root; saved logs and state are for root only
 
 CONTAINER=${MW_CONTAINER:-twitch-drops-miner}
 STATE_DIR=${MW_STATE_DIR:-/mnt/user/appdata/miner-watchdog}
@@ -54,6 +55,19 @@ put() {
   fi
 }
 
+# read_num FILE: print the whole number stored in FILE, or 0 if it is missing or corrupt.
+# Never use a state file's text in (( )) unchecked: bash runs $(...) found inside it.
+read_num() {
+  local v=0
+  [[ -f $1 ]] || { echo 0; return 0; }
+  v=$(<"$1")
+  if [[ ! $v =~ ^[0-9]+$ ]]; then
+    log "ignoring corrupt state file $1"
+    v=0
+  fi
+  echo "$v"
+}
+
 STAMP="" # NOW as 20261028T093000Z (UTC), set in main
 ISO=""   # NOW as 2026-10-28T09:30:00Z (UTC), set in main
 
@@ -71,9 +85,9 @@ run_alert() { # run_alert TITLE DESCRIPTION
 
 # deliver KIND: send the pending card for KIND. On success clear it and start its cooldown.
 deliver() {
-  local kind=$1 pend="$STATE_DIR/pending-$1" title desc n=0
+  local kind=$1 pend="$STATE_DIR/pending-$1" title desc n
   { IFS= read -r title; desc=$(cat); } <"$pend"
-  [[ -f $STATE_DIR/suppressed-$kind ]] && n=$(<"$STATE_DIR/suppressed-$kind")
+  n=$(read_num "$STATE_DIR/suppressed-$kind")
   if ((n > 0)); then
     desc+=$'\n\n'"$n more since last card."
   fi
@@ -88,19 +102,19 @@ deliver() {
 }
 
 bump_suppressed() {
-  local f="$STATE_DIR/suppressed-$1" n=0
-  [[ -f $f ]] && n=$(<"$f")
+  local f="$STATE_DIR/suppressed-$1" n
+  n=$(read_num "$f")
   put "$f" $((n + 1))
 }
 
 # send_card KIND COOLDOWN_SECONDS TITLE DESCRIPTION
 send_card() {
-  local kind=$1 cooldown=$2 title=$3 desc=$4 last=0
+  local kind=$1 cooldown=$2 title=$3 desc=$4 last
   if [[ -f $STATE_DIR/pending-$kind ]]; then
     bump_suppressed "$kind" # an earlier card of this kind is still waiting to be sent
     return 0
   fi
-  [[ -f $STATE_DIR/card-$kind.ts ]] && last=$(<"$STATE_DIR/card-$kind.ts")
+  last=$(read_num "$STATE_DIR/card-$kind.ts")
   if ((NOW - last < cooldown)); then
     bump_suppressed "$kind"
     return 0
