@@ -187,11 +187,11 @@ test_old_restarts_do_not_count() {
 }
 
 test_exited_nonzero_cards_once_per_finishedat() {
-  set_inspect exited none 137 "2026-10-28T01:02:03Z"
+  set_inspect exited none 2 "2026-10-28T01:02:03Z"
   run_wd
   assert_eq "$RC" 0 "exit code"
   assert_eq "$(alerts_count)" 1 "alerts"
-  assert_contains "$(alert_title 1)" "stopped with exit code 137" "title"
+  assert_contains "$(alert_title 1)" "stopped with exit code 2" "title"
   assert_eq "$(restarts_count)" 0 "must not start it"
   run_wd 300
   assert_eq "$(alerts_count)" 1 "same FinishedAt: no second card"
@@ -209,6 +209,35 @@ test_exited_zero_does_nothing() {
   assert_eq "$RC" 0 "exit code"
   assert_eq "$(alerts_count)" 0 "alerts"
   assert_eq "$(restarts_count)" 0 "restarts"
+}
+
+test_stopped_by_docker_stop_does_nothing() {
+  local c
+  for c in 137 143; do
+    set_inspect exited none "$c" "2026-10-28T04:0$((c % 10)):00Z"
+    run_wd
+    assert_eq "$RC" 0 "exit code ($c)"
+  done
+  assert_eq "$(alerts_count)" 0 "a docker stop (SIGTERM/SIGKILL) is not a crash"
+}
+
+test_overlapping_run_does_nothing() {
+  mkdir -p "$S/lock"
+  echo $$ >"$S/lock/pid" # this test shell is alive, so the lock is held
+  set_inspect running unhealthy 0 "0001-01-01T00:00:00Z"
+  run_wd
+  assert_eq "$RC" 1 "an overlap means something is slow: fail the run"
+  assert_eq "$(restarts_count)" 0 "no second restart while a run is going"
+  assert_contains "$(<"$ERR")" "still running" "overlap is logged"
+}
+
+test_stale_lock_is_taken_over() {
+  mkdir -p "$S/lock"
+  echo 999999 >"$S/lock/pid" # no such process
+  set_inspect running unhealthy 0 "0001-01-01T00:00:00Z"
+  run_wd
+  assert_eq "$(restarts_count)" 1 "stale lock does not block"
+  assert_no_file "$S/lock"
 }
 
 test_missing_container_cards_once_per_24h() {

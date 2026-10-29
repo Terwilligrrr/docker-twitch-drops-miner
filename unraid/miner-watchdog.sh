@@ -35,6 +35,7 @@ MISSING_COOLDOWN=$((24 * 3600))
 KEEP_LOGS=10
 LOG_LINES=150
 ALERT_TIMEOUT=90
+DOCKER_TIMEOUT=60 # a hung daemon must not hang the run
 
 RC=0 # becomes 1 if anything goes wrong during this run
 
@@ -44,6 +45,8 @@ log() {
     logger -t miner-watchdog -- "$*" || echo "miner-watchdog: logger failed" >&2
   fi
 }
+
+dk() { timeout "$DOCKER_TIMEOUT" docker "$@"; }
 
 # put FILE TEXT: replace FILE with TEXT (atomically). A state file we cannot write is fatal.
 put() {
@@ -179,7 +182,7 @@ handle_freeze() {
   fi
 
   local logfile="$STATE_DIR/freeze-$STAMP.log" logmsg="" out
-  if ! docker logs --tail "$LOG_LINES" "$CONTAINER" >"$logfile" 2>&1; then
+  if ! dk logs --tail "$LOG_LINES" "$CONTAINER" >"$logfile" 2>&1; then
     log "ERROR: docker logs failed for $CONTAINER"
     RC=1
     logmsg=" (docker logs failed; the saved file may be incomplete)"
@@ -190,7 +193,7 @@ handle_freeze() {
     rm -f -- "${files[@]:0:extra}"
   fi
 
-  if ! out=$(docker restart "$CONTAINER" 2>&1); then
+  if ! out=$(dk restart "$CONTAINER" 2>&1); then
     problem restartfailed "could not restart $CONTAINER" "docker restart failed: $out. Saved log: $logfile"
     return 0
   fi
@@ -225,6 +228,24 @@ if ! mkdir -p "$STATE_DIR"; then
   log "ERROR: cannot create state dir $STATE_DIR"
   exit 1
 fi
+# One run at a time, or two slow runs could both restart the container. mkdir is atomic.
+LOCK="$STATE_DIR/lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  holder=$(<"$LOCK/pid") 2>/dev/null || holder=""
+  if [[ $holder =~ ^[0-9]+$ ]] && kill -0 "$holder" 2>/dev/null; then
+    log "ERROR: previous run (pid $holder) is still running; skipping this run"
+    exit 1
+  fi
+  log "taking over a stale lock (pid '$holder' is gone)"
+  rm -rf -- "$LOCK"
+  if ! mkdir "$LOCK"; then
+    log "ERROR: cannot take the lock $LOCK"
+    exit 1
+  fi
+fi
+trap 'rm -rf -- "$LOCK"' EXIT
+echo $$ >"$LOCK/pid"
+
 if [[ ! $NOW =~ ^[0-9]+$ ]]; then
   log "ERROR: bad time value '$NOW'"
   exit 1
@@ -236,8 +257,8 @@ TZ=UTC0 printf -v ISO '%(%Y-%m-%dT%H:%M:%SZ)T' "$NOW"
 retry_pending
 
 fmt='{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.State.ExitCode}}|{{.State.FinishedAt}}'
-if ! info=$(docker inspect -f "$fmt" "$CONTAINER" 2>&1); then
-  if names=$(docker ps -a --format '{{.Names}}' 2>&1); then
+if ! info=$(dk inspect -f "$fmt" "$CONTAINER" 2>&1); then
+  if names=$(dk ps -a --format '{{.Names}}' 2>&1); then
     if grep -Fxq -- "$CONTAINER" <<<"$names"; then
       problem inspectfailed "could not inspect $CONTAINER" "docker inspect failed: $info"
     else
@@ -263,7 +284,7 @@ if [[ $status == running ]]; then
     healthy | starting | none) put "$STATE_DIR/last-ok" "$ISO" ;;
     *) problem badhealth "unknown health status" "Docker reported health status '$health' for $CONTAINER" ;;
   esac
-elif ((code != 0)); then
+elif ((code != 0 && code != 137 && code != 143)); then # 137/143 = stopped by docker stop
   handle_stopped "$code" "$finished"
 fi
 
