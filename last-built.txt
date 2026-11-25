@@ -1,4 +1,4 @@
-miner_commit=f85eabf15d43c4ae4df7b389cf439b7724f30c71
-image=ghcr.io/terwilligrrr/twitch-drops-miner:sha-f85eabf
-built_at=2026-11-24T19:51:03Z
-run=https://github.com/Terwilligrrr/docker-twitch-drops-miner/actions/runs/45474179854
+miner_commit=9f9598e5b649ba893715da33e7f0fb074e941aed
+image=ghcr.io/terwilligrrr/twitch-drops-miner:sha-9f9598e
+built_at=2026-11-25T23:20:22Z
+run=https://github.com/Terwilligrrr/docker-twitch-drops-miner/actions/runs/45720262962
